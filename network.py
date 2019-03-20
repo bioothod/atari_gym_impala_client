@@ -22,13 +22,55 @@ def conv_network(config, input, scope='conv', reuse=False):
     with tf.variable_scope(scope, reuse=reuse):
         conv_out = input_map
 
-        conv_out = tf.layers.conv2d(inputs=conv_out, filters=32, kernel_size=8, strides=4, padding='same', activation=tf.nn.relu)
-        conv_out = tf.layers.conv2d(inputs=conv_out, filters=64, kernel_size=4, strides=2, padding='same', activation=tf.nn.relu)
+        for i, (num_ch, num_blocks) in enumerate([(16, 2), (32, 2)]):
+            # Downscale.
+            conv_out = tf.layers.conv2d(
+                    inputs=conv_out,
+                    filters=num_ch,
+                    kernel_size=3,
+                    strides=1,
+                    padding='SAME',
+                    use_bias=True,
+                    kernel_regularizer=tf.contrib.layers.l2_regularizer(weight_decay),
+                    kernel_initializer=tf.contrib.layers.xavier_initializer(),
+            )
+            conv_out = tf.nn.pool(
+                    conv_out,
+                    window_shape=[3, 3],
+                    pooling_type='MAX',
+                    padding='SAME',
+                    strides=[2, 2],
+            )
 
-        conv_out = tf.layers.flatten(conv_out)
+            # Residual block(s).
+            for j in range(num_blocks):
+                with tf.variable_scope('residual_%d_%d' % (i, j)):
+                    block_input = conv_out
+                    conv_out = tf.nn.relu(conv_out)
+                    conv_out = tf.layers.conv2d(
+                            inputs=conv_out,
+                            filters=num_ch,
+                            kernel_size=3,
+                            strides=1,
+                            padding='SAME',
+                            use_bias=True,
+                            kernel_regularizer=tf.contrib.layers.l2_regularizer(weight_decay),
+                            kernel_initializer=tf.contrib.layers.xavier_initializer(),
+                    )
+                    conv_out = tf.nn.relu(conv_out)
+                    conv_out = tf.layers.conv2d(
+                            inputs=conv_out,
+                            filters=num_ch,
+                            kernel_size=3,
+                            strides=1,
+                            padding='SAME',
+                            use_bias=True,
+                            kernel_regularizer=tf.contrib.layers.l2_regularizer(weight_decay),
+                            kernel_initializer=tf.contrib.layers.xavier_initializer(),
+                    )
+                    conv_out += block_input
 
-        conv_out = tf.layers.dense(inputs=conv_out, units=512, activation=tf.nn.relu, use_bias=True, name='dense_layer')
-
+        conv_out = tf.nn.relu(conv_out)
         conv_out = tf.layers.flatten(conv_out)
 
         return conv_out
@@ -50,7 +92,7 @@ def create_rnn_network(config, input_features, scope='lstmp', reuse=False):
     with tf.variable_scope(scope, reuse=reuse):
         logging.info('lstm lyaer: input: {}'.format(input_features))
 
-        rnn_layers = [tf.nn.rnn_cell.LSTMCell(lstm_size) for lstm_size in [8, 8, config.get('num_actions') + 1]]
+        rnn_layers = [tf.nn.rnn_cell.LSTMCell(lstm_size) for lstm_size in [8, config.get('num_actions') + 1]]
         multi_rnn_cell = tf.nn.rnn_cell.MultiRNNCell(rnn_layers)
 
         outputs, state = tf.nn.dynamic_rnn(multi_rnn_cell, input_features, dtype=tf.float32)
