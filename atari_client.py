@@ -9,6 +9,7 @@ import logging
 import os
 import random
 import sys
+import time
 
 import game
 import halite_model_pb2
@@ -37,6 +38,8 @@ class GameWrapper:
         self.config['num_actions'] = self.env.action_space.n
 
         self.step = 0
+        self.train_step = 0
+        self.have_graph = False
 
         opts = [
             ('grpc.max_send_message_length', 50 * 1024 * 1024),
@@ -76,21 +79,32 @@ class GameWrapper:
         return self.state.current()
 
     def load_model(self):
+        start_time = time.time()
         proto = self.stub.GetFrozenGraph(halite_model_pb2.Status())
         if not proto:
             logging.error('could not get frozen graph, method returned None')
             return
+        request_time = time.time() - start_time
 
         with self.graph.as_default():
+            start_time = time.time()
+            checkpoint_time = 0.0
+
             od_graph_def = tf.GraphDef()
 
             if len(proto.frozen_graph) != 0:
                 od_graph_def.ParseFromString(proto.frozen_graph)
                 tf.import_graph_def(od_graph_def, name='')
+                graph_def_parsing_time = time.time() - start_time
             else:
-                od_graph_def.ParseFromString(proto.graph_def)
-                tf.import_graph_def(od_graph_def, name='')
+                if not self.have_graph:
+                    od_graph_def.ParseFromString(proto.graph_def)
+                    tf.import_graph_def(od_graph_def, name='')
+                    self.have_graph = True
 
+                graph_def_parsing_time = time.time() - start_time
+
+                start_time = time.time()
                 prefix = '{}/{}.tmp.{}'.format(self.config['tmp_dir'], str(random.randint(0, 10000000)), os.path.basename(proto.prefix))
                 index_file = '{}.index'.format(prefix)
                 data_file = '{}.data-00000-of-00001'.format(prefix)
@@ -107,13 +121,20 @@ class GameWrapper:
                 os.remove(index_file)
                 os.remove(data_file)
 
+                checkpoint_time = time.time() - start_time
+
+            start_time = time.time()
             with tf.device('/cpu:0'):
                 self.policy_logits_op = self.graph.get_tensor_by_name('output/policy_logits:0')
                 self.action_op = self.graph.get_tensor_by_name('output/new_action_train:0')
 
                 #logging.info('policy_logits: {}, action: {}'.format(self.policy_logits_op, self.action_op))
 
-            #logging.info('model has been reloaded from the server')
+            tensor_lookup_time = time.time() - start_time
+
+            self.train_step = proto.train_step
+            logging.info('reloaded: train_step: {}, network request: {:.1f} ms, graph_def parsing: {:.1f} ms, checkpoint recovery: {:.1f} ms, tensor lookup: {:.1f} ms'.format(
+                self.train_step, request_time * 1000, graph_def_parsing_time * 1000, checkpoint_time * 1000, tensor_lookup_time * 1000))
 
     def get_action(self, input_maps, input_params, last_actions, last_rewards):
         fd = {
@@ -150,6 +171,7 @@ class GameWrapper:
                 owner_id = self.owner_id,
                 env_id = self.env_id,
                 step = self.step,
+                train_step = self.train_step,
                 state = self.prev_model_st,
                 action = action,
                 reward = reward,
@@ -176,6 +198,7 @@ def run_main():
     parser.add_argument('--logfile', type=str, help='Logfile')
     parser.add_argument('--load_model_steps', default=100, type=int, help='Load learner\'s model every this number steps')
     parser.add_argument('--player_id', default=0, type=int, help='Player ID used to index history entries')
+    parser.add_argument('--num_episodes', default=1000, type=int, help='Number of episodes to run')
 
     FLAGS = parser.parse_args()
 
@@ -222,7 +245,7 @@ def run_main():
 
         return steps_to_load
 
-    while True:
+    while FLAGS.num_episodes < 0 or episode < FLAGS.num_episodes:
         steps_to_load = try_reload_model(steps_to_load, True)
 
         game.prev_st = game.reset()
