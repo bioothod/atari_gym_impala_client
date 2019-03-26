@@ -39,7 +39,7 @@ class GameWrapper:
         self.config['num_actions'] = self.env.action_space.n
 
         self.step = 0
-        self.train_step = 0
+        self.train_step = -1
         self.have_graph = False
 
         opts = [
@@ -95,10 +95,18 @@ class GameWrapper:
 
     def load_model(self):
         start_time = time.time()
-        proto = self.stub.GetFrozenGraph(halite_model_pb2.Status())
-        if not proto:
-            logging.error('could not get frozen graph, method returned None')
-            return
+        while True:
+            proto = self.stub.GetFrozenGraph(halite_model_pb2.Status())
+            if not proto:
+                logging.error('could not get frozen graph, method returned None')
+                return
+
+            if proto.train_step != self.train_step:
+                break
+
+            time.sleep(0.1)
+
+        self.train_step = proto.train_step
         request_time = time.time() - start_time
 
         with self.graph.as_default():
@@ -145,7 +153,6 @@ class GameWrapper:
 
             tensor_lookup_time = time.time() - start_time
 
-            self.train_step = proto.train_step
             logging.info('reloaded: train_step: {}, network request: {:.1f} ms, graph_def parsing: {:.1f} ms, checkpoint recovery: {:.1f} ms, tensor lookup: {:.1f} ms'.format(
                 self.train_step, request_time * 1000, graph_def_parsing_time * 1000, checkpoint_time * 1000, tensor_lookup_time * 1000))
 
@@ -213,7 +220,7 @@ def run_main():
     parser.add_argument('--dump_model', action='store_true', help='Dump model into checkpoint/graph and exit')
     parser.add_argument('--remote_addr', default='localhost:5001', type=str, help='Remote service address to connect to for inference')
     parser.add_argument('--logfile', type=str, help='Logfile')
-    parser.add_argument('--load_model_steps', default=100, type=int, help='Load learner\'s model every this number steps')
+    parser.add_argument('--load_model_steps', default=80, type=int, help='Load learner\'s model every this number steps')
     parser.add_argument('--player_id', default=0, type=int, help='Player ID used to index history entries')
     parser.add_argument('--num_clients', default=32, type=int, help='Maximum number of clients simultaneously connected to the training server')
     parser.add_argument('--num_episodes', default=1000, type=int, help='Number of episodes to run')
@@ -265,9 +272,7 @@ def run_main():
         return steps_to_load
 
     while FLAGS.num_episodes < 0 or episode < FLAGS.num_episodes:
-        steps_to_load = try_reload_model(steps_to_load, True)
-
-        game.reset_inner_state()
+        #steps_to_load = try_reload_model(steps_to_load, True)
 
         game.prev_st = game.reset()
         game.prev_model_st = halite_model_pb2.State(state=game.prev_st.state.tobytes(), params=game.prev_st.params.tobytes())
@@ -285,7 +290,8 @@ def run_main():
         if len(episode_rewards) > 100:
             episode_rewards = episode_rewards[1:]
 
-        logging.info('{}: steps: {}, episode reward: {}, mean episode reward: {:.1f}, std: {:.1f}'.format(episode, len(rewards), er, np.mean(episode_rewards), np.std(episode_rewards)))
+        logging.info('{}: last train_step: {}, steps: {}, episode reward: {}, mean episode reward: {:.1f}, std: {:.1f}'.format(
+            episode, game.train_step, len(rewards), er, np.mean(episode_rewards), np.std(episode_rewards)))
         episode += 1
 
 def main():
