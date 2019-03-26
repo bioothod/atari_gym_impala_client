@@ -9,7 +9,7 @@ from env import *
 
 
 class Model:
-    def __init__(self, config):
+    def __init__(self, config, is_client=False):
         self.config = config
 
         self.graph = tf.Graph()
@@ -49,19 +49,22 @@ class Model:
         conv_output = network.create_conv_network(config, network_dict, scope='impala_cnn')
         reshaped_output = tf.reshape(conv_output, [-1, self.time_steps_ph, conv_output.shape[-1]])
 
-        policy_logits, baseline = network.create_rnn_network(config, reshaped_output, scope='impala_lstm')
+        rnn_state = network.rnn_head(config, reshaped_output, scope='impala_rnn')
+
+        policy_logits = rnn_state.policy_logits
+        baseline = rnn_state.baseline
         logging.info('policy_logits: {}, baseline: {}'.format(policy_logits, baseline))
 
         self.policy_logits = tf.identity(policy_logits, name='output/policy_logits')
 
         last_logits = self.policy_logits[:, -1, :]
         self.new_action_predict = tf.argmax(last_logits, axis=1, name='output/new_action_predict')
-        self.new_action_train = tf.random.categorical(last_logits, num_samples=1, dtype=tf.int32)
+        self.new_action_train = tf.random.multinomial(last_logits, num_samples=1, output_dtype=tf.int32)
         self.new_action_train = tf.squeeze(self.new_action_train, 1, name='output/new_action_train')
 
         pshape = policy_logits.shape[-1]
         policy_flattened_to_batch = tf.reshape(policy_logits, [-1, pshape])
-        actions_flattened_to_batch = tf.random.categorical(policy_flattened_to_batch, num_samples=1, dtype=tf.int32)
+        actions_flattened_to_batch = tf.random.multinomial(policy_flattened_to_batch, num_samples=1, output_dtype=tf.int32)
         actions_flattened_to_batch = tf.squeeze(actions_flattened_to_batch)
         actions_r = tf.reshape(actions_flattened_to_batch, [-1, self.time_steps_ph])
 
@@ -151,6 +154,12 @@ class Model:
 
         self.train_op = opt.minimize(self.total_loss, global_step=self.global_step_op, name='output/train_op')
 
+        self.total_saver = tf.train.Saver()
+
+        if is_client:
+            return
+
+
         self.steps = 0
         hooks = []
 
@@ -173,7 +182,6 @@ class Model:
 
         init_op = tf.initializers.variables(variables_to_init)
 
-        self.total_saver = tf.train.Saver()
         saver = tf.train.Saver(var_list=variables_to_restore)
 
         def init_fn(scaffold, sess):
@@ -357,17 +365,13 @@ class Model:
             # Make sure no gradients backpropagated through the returned values.
             return tf.stop_gradient(vs), tf.stop_gradient(pg_advantages)
 
-def create_model(config):
+def create_model(config, is_client=False):
     #tf.logging.set_verbosity(tf.logging.ERROR)
     #logging.getLogger('tensorflow').setLevel(logging.ERROR)
     #os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
     os.environ['CUDA_VISIBLE_DEVICES'] = config.get('visible_devices', '')
 
-    checkpoint_dir = config.get('train_dir')
-    os.makedirs(checkpoint_dir, exist_ok=True)
-
     config_internal = {
-        'checkpoint_dir': checkpoint_dir,
         'discount_gamma': 0.99,
         'policy_gradient_loss_scale': 1,
         'cross_entropy_loss_scale': 0.00005,
@@ -380,7 +384,13 @@ def create_model(config):
         'learning_rate_decay_steps': 100000,
     }
 
+    if not is_client:
+        checkpoint_dir = config.get('train_dir')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        config_internal['checkpoint_dir'] = checkpoint_dir
+
+
     config.update(config_internal)
 
-    m = Model(config)
+    m = Model(config, is_client=is_client)
     return m

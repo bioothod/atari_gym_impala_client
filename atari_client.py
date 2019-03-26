@@ -14,6 +14,7 @@ import time
 import game
 import halite_model_pb2
 import halite_model_pb2_grpc
+import model
 
 from env import stacked_env
 
@@ -50,11 +51,18 @@ class GameWrapper:
 
         self.graph = tf.Graph()
         with self.graph.as_default():
+            config['batch_size'] = 1
+            self.model = model.create_model(config, is_client=True)
+            self.have_graph = True
+
             session_config = tf.ConfigProto()
             session_config.allow_soft_placement = True
             self.sess = tf.Session(config=session_config)
 
             self.load_model()
+
+        self.input_lstm_state_sizes = self.graph.get_tensor_by_name('impala_rnn/output/lstm_state_sizes:0').eval(session=self.sess)
+        self.reset_inner_state()
 
         self.state = stacked_env(self.config)
         self.prev_action = -1
@@ -77,6 +85,13 @@ class GameWrapper:
 
         self.state.append(res, params)
         return self.state.current()
+
+    def reset_inner_state(self):
+        c_state_size = self.input_lstm_state_sizes[0]
+        h_state_size = self.input_lstm_state_sizes[1]
+
+        self.c_state = np.zeros([1, c_state_size], np.float32)
+        self.h_state = np.zeros([1, h_state_size], np.float32)
 
     def load_model(self):
         start_time = time.time()
@@ -113,10 +128,7 @@ class GameWrapper:
                 with open(data_file, 'wb+') as f:
                     f.write(proto.checkpoint_data)
 
-                sd = tf.train.SaverDef()
-                sd.ParseFromString(proto.saver_def)
-                saver = tf.train.Saver.from_proto(sd)
-                saver.restore(self.sess, prefix)
+                self.model.total_saver.restore(self.sess, prefix)
 
                 os.remove(index_file)
                 os.remove(data_file)
@@ -127,6 +139,7 @@ class GameWrapper:
             with tf.device('/cpu:0'):
                 self.policy_logits_op = self.graph.get_tensor_by_name('output/policy_logits:0')
                 self.action_op = self.graph.get_tensor_by_name('output/new_action_train:0')
+                self.lstm_state_op = self.graph.get_tensor_by_name('impala_rnn/output/lstm_state:0')
 
                 #logging.info('policy_logits: {}, action: {}'.format(self.policy_logits_op, self.action_op))
 
@@ -143,9 +156,13 @@ class GameWrapper:
             'input/action_taken:0': last_actions,
             'input/reward:0': last_rewards,
             'input/time_steps:0': self.state_stack_size,
+            'impala_rnn/input/c_state:0': self.c_state,
+            'impala_rnn/input/h_state:0': self.h_state,
         }
 
-        logits, action = self.sess.run([self.policy_logits_op, self.action_op], feed_dict = fd)
+        logits, action, state = self.sess.run([self.policy_logits_op, self.action_op, self.lstm_state_op], feed_dict = fd)
+        self.c_state, self.h_state = state
+
         return logits[0][0], action[0]
 
     def reset(self):
@@ -198,6 +215,7 @@ def run_main():
     parser.add_argument('--logfile', type=str, help='Logfile')
     parser.add_argument('--load_model_steps', default=100, type=int, help='Load learner\'s model every this number steps')
     parser.add_argument('--player_id', default=0, type=int, help='Player ID used to index history entries')
+    parser.add_argument('--num_clients', default=32, type=int, help='Maximum number of clients simultaneously connected to the training server')
     parser.add_argument('--num_episodes', default=1000, type=int, help='Number of episodes to run')
 
     FLAGS = parser.parse_args()
@@ -224,6 +242,7 @@ def run_main():
     if FLAGS.dump_model:
         env = gym.make(config['game'])
         config['num_actions'] = env.action_space.n
+        config['batch_size'] = FLAGS.num_clients
 
         import model
 
@@ -247,6 +266,8 @@ def run_main():
 
     while FLAGS.num_episodes < 0 or episode < FLAGS.num_episodes:
         steps_to_load = try_reload_model(steps_to_load, True)
+
+        game.reset_inner_state()
 
         game.prev_st = game.reset()
         game.prev_model_st = halite_model_pb2.State(state=game.prev_st.state.tobytes(), params=game.prev_st.params.tobytes())
