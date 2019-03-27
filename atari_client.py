@@ -24,6 +24,8 @@ class GameWrapper:
         self.owner_id = config['owner_id']
         self.env_id = config['env_id']
 
+        self.trajectory = []
+
         self.input_map_shape = config['input_map_shape']
         self.input_params_shape = config['input_params_shape']
         self.state_stack_size = config['state_stack_size']
@@ -40,6 +42,8 @@ class GameWrapper:
 
         self.step = 0
         self.train_step = -1
+        self.trajectory_len = -1
+
         self.have_graph = False
 
         opts = [
@@ -62,7 +66,14 @@ class GameWrapper:
             self.load_model()
 
         self.input_lstm_state_sizes = self.graph.get_tensor_by_name('impala_rnn/output/lstm_state_sizes:0').eval(session=self.sess)
-        self.reset_inner_state()
+        c_state_size = self.input_lstm_state_sizes[0]
+        h_state_size = self.input_lstm_state_sizes[1]
+
+        self.init_c_state = np.zeros([1, c_state_size], np.float32)
+        self.init_h_state = np.zeros([1, h_state_size], np.float32)
+
+        self.c_state = np.zeros([1, c_state_size], np.float32)
+        self.h_state = np.zeros([1, h_state_size], np.float32)
 
         self.state = stacked_env(self.config)
         self.prev_action = -1
@@ -86,27 +97,17 @@ class GameWrapper:
         self.state.append(res, params)
         return self.state.current()
 
-    def reset_inner_state(self):
-        c_state_size = self.input_lstm_state_sizes[0]
-        h_state_size = self.input_lstm_state_sizes[1]
-
-        self.c_state = np.zeros([1, c_state_size], np.float32)
-        self.h_state = np.zeros([1, h_state_size], np.float32)
-
     def load_model(self):
         start_time = time.time()
-        while True:
-            proto = self.stub.GetFrozenGraph(halite_model_pb2.Status())
-            if not proto:
-                logging.error('could not get frozen graph, method returned None')
-                return
 
-            if proto.train_step != self.train_step:
-                break
-
-            time.sleep(0.1)
+        proto = self.stub.GetFrozenGraph(halite_model_pb2.Status())
+        if not proto:
+            logging.error('could not get frozen graph, method returned None')
+            return
 
         self.train_step = proto.train_step
+        self.trlen = proto.trajectory_len
+
         request_time = time.time() - start_time
 
         with self.graph.as_default():
@@ -153,8 +154,8 @@ class GameWrapper:
 
             tensor_lookup_time = time.time() - start_time
 
-            logging.info('reloaded: train_step: {}, network request: {:.1f} ms, graph_def parsing: {:.1f} ms, checkpoint recovery: {:.1f} ms, tensor lookup: {:.1f} ms'.format(
-                self.train_step, request_time * 1000, graph_def_parsing_time * 1000, checkpoint_time * 1000, tensor_lookup_time * 1000))
+            logging.info('reloaded: train_step: {}, trajectory len: {}, network request: {:.1f} ms, graph_def parsing: {:.1f} ms, checkpoint recovery: {:.1f} ms, tensor lookup: {:.1f} ms'.format(
+                self.train_step, self.trlen, request_time * 1000, graph_def_parsing_time * 1000, checkpoint_time * 1000, tensor_lookup_time * 1000))
 
     def get_action(self, input_maps, input_params, last_actions, last_rewards):
         fd = {
@@ -195,7 +196,6 @@ class GameWrapper:
                 owner_id = self.owner_id,
                 env_id = self.env_id,
                 step = self.step,
-                train_step = self.train_step,
                 state = self.prev_model_st,
                 action = action,
                 reward = reward,
@@ -203,7 +203,26 @@ class GameWrapper:
                 done = done,
                 logits = logits,
             )
-        self.stub.HistoryAppend(model_he)
+
+        self.trajectory.append(model_he)
+        if len(self.trajectory) == self.trlen:
+            #logging.info('c_state: {}, init_c_state: {}'.format(self.c_state, self.init_c_state))
+            tr = halite_model_pb2.Trajectory(
+                owner_id = self.owner_id,
+                env_id = self.env_id,
+                entries = self.trajectory,
+                train_step = self.train_step,
+                c_state = self.init_c_state[0],
+                h_state = self.init_h_state[0],
+
+            )
+            self.stub.HistoryAppend(tr)
+            self.trajectory = []
+
+            self.init_c_state = self.c_state.copy()
+            self.init_h_state = self.h_state.copy()
+
+            self.load_model()
 
         self.prev_st = new_st
         self.prev_model_st = new_model_st
@@ -220,7 +239,6 @@ def run_main():
     parser.add_argument('--dump_model', action='store_true', help='Dump model into checkpoint/graph and exit')
     parser.add_argument('--remote_addr', default='localhost:5001', type=str, help='Remote service address to connect to for inference')
     parser.add_argument('--logfile', type=str, help='Logfile')
-    parser.add_argument('--load_model_steps', default=80, type=int, help='Load learner\'s model every this number steps')
     parser.add_argument('--player_id', default=0, type=int, help='Player ID used to index history entries')
     parser.add_argument('--num_clients', default=32, type=int, help='Maximum number of clients simultaneously connected to the training server')
     parser.add_argument('--num_episodes', default=1000, type=int, help='Number of episodes to run')
@@ -262,17 +280,7 @@ def run_main():
     episode = 0
     episode_rewards = []
 
-    steps_to_load = FLAGS.load_model_steps
-    def try_reload_model(steps_to_load, force = False):
-        steps_to_load -= 1
-        if steps_to_load == 0 or force:
-            steps_to_load = FLAGS.load_model_steps
-            game.load_model()
-
-        return steps_to_load
-
     while FLAGS.num_episodes < 0 or episode < FLAGS.num_episodes:
-        #steps_to_load = try_reload_model(steps_to_load, True)
 
         game.prev_st = game.reset()
         game.prev_model_st = halite_model_pb2.State(state=game.prev_st.state.tobytes(), params=game.prev_st.params.tobytes())
@@ -282,8 +290,6 @@ def run_main():
         while not done:
             done = game.loop_body()
             rewards.append(game.prev_reward)
-
-            steps_to_load = try_reload_model(steps_to_load, False)
 
         er = np.sum(rewards)
         episode_rewards.append(er)
