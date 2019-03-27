@@ -4,25 +4,13 @@ import logging
 
 weight_decay = 1e-5
 
-def conv_single_image(image, params, scope='img', reuse=False):
-    with tf.variable_scope(scope, reuse=reuse):
-        with tf.variable_scope('flat', reuse=reuse):
-            flat_map = tf.layers.flatten(image)
-            flat_params = tf.layers.flatten(params)
-            concat = tf.concat([flat_map, flat_params], 1)
-
-            #flat = flat_map
-            flat = concat
-
-            return flat
-
 def conv_network(config, input, scope='conv', reuse=False):
     input_map = input['map']
 
     with tf.variable_scope(scope, reuse=reuse):
         conv_out = input_map
 
-        for i, (num_ch, num_blocks) in enumerate([(16, 2), (32, 2)]):
+        for i, (num_ch, num_blocks) in enumerate([(16, 2), (32, 2), (32, 2)]):
             # Downscale.
             conv_out = tf.layers.conv2d(
                     inputs=conv_out,
@@ -73,6 +61,7 @@ def conv_network(config, input, scope='conv', reuse=False):
         conv_out = tf.nn.relu(conv_out)
         conv_out = tf.layers.flatten(conv_out)
 
+        conv_out = tf.layers.dense(conv_out, 256, activation=tf.nn.relu)
         return conv_out
 
 def create_conv_network(config, input_dict, scope='input', reuse=False):
@@ -95,7 +84,7 @@ class rnn_head:
 
             batch_size = config['batch_size']
 
-            num_lstm_outputs = 10
+            num_lstm_outputs = 64
             self.lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(num_lstm_outputs, state_is_tuple=True)
 
             self.c_state_ph = tf.placeholder(tf.float32, shape=[batch_size, self.lstm_cell.state_size.c], name='input/c_state')
