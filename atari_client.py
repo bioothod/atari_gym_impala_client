@@ -11,12 +11,18 @@ import random
 import sys
 import time
 
+import env
 import game
 import halite_model_pb2
 import halite_model_pb2_grpc
 import model
 
-from env import stacked_env
+from state import stacked_env
+
+def softmax(x):
+    """Compute softmax values for each sets of scores in x."""
+    e_x = np.exp(x - np.max(x))
+    return e_x / e_x.sum(axis=0)
 
 class GameWrapper:
     def __init__(self, config):
@@ -30,9 +36,10 @@ class GameWrapper:
         self.input_params_shape = config['input_params_shape']
         self.state_stack_size = config['state_stack_size']
 
-        self.env = gym.make(config['game'])
-        self.env = game.MaxAndSkipEnv(self.env)
-        self.env = game.FireResetEnv(self.env)
+        self.env = env.Env()
+        #self.env = gym.make(config['game'])
+        #self.env = game.MaxAndSkipEnv(self.env)
+        #self.env = game.FireResetEnv(self.env)
 
         monitor_dir = config.get('monitor_dir')
         if monitor_dir:
@@ -69,11 +76,12 @@ class GameWrapper:
         c_state_size = self.input_lstm_state_sizes[0]
         h_state_size = self.input_lstm_state_sizes[1]
 
-        self.init_c_state = np.zeros([1, c_state_size], np.float32)
-        self.init_h_state = np.zeros([1, h_state_size], np.float32)
-
         self.c_state = np.zeros([1, c_state_size], np.float32)
         self.h_state = np.zeros([1, h_state_size], np.float32)
+
+        self.init_c_state = self.c_state.copy()
+        self.init_h_state = self.h_state.copy()
+
 
         self.state = stacked_env(self.config)
         self.prev_action = -1
@@ -82,15 +90,7 @@ class GameWrapper:
         self.prev_st = None
 
     def new_state(self, state):
-        #state = obs[35:195]
-        #state = state[::, ::, 0]
-        state = 0.2126 * state[:, :, 0] + 0.7152 * state[:, :, 1] + 0.0722 * state[:, :, 2]
-
-        state = state.astype(np.float32)
-        res = cv2.resize(state, (self.input_map_shape[0], self.input_map_shape[1]))
-        res /= 255.
-
-        res = np.reshape(res, self.input_map_shape)
+        res = np.reshape(state, self.input_map_shape)
 
         params = np.zeros(shape=self.input_params_shape, dtype=np.float32)
 
@@ -190,7 +190,8 @@ class GameWrapper:
         reward, new_st, done = self.env_step(action)
         new_model_st = halite_model_pb2.State(state=new_st.state.tobytes(), params=new_st.params.tobytes())
 
-        #logging.info('loop: {}: {}.{}: action: {}, reward: {}, done: {}'.format(self.step, self.owner_id, self.env_id, action, reward, done))
+        logging.info('loop: {}: {}.{}: state: {}, action: {}, new_state: {}, reward: {}, done: {}, logits: {}'.format(
+            self.step, self.owner_id, self.env_id, self.prev_st.state, action, new_st.state, reward, done, softmax(logits)))
 
         model_he = halite_model_pb2.HistoryEntry(
                 owner_id = self.owner_id,
@@ -223,6 +224,10 @@ class GameWrapper:
             self.init_h_state = self.h_state.copy()
 
             self.load_model()
+
+        if done:
+            self.c_state = np.zeros_like(self.c_state)
+            self.h_state = np.zeros_like(self.h_state)
 
         self.prev_st = new_st
         self.prev_model_st = new_model_st
@@ -258,15 +263,16 @@ def run_main():
             'state_stack_size': 1,
             'remote_addr': FLAGS.remote_addr,
             'train_dir': FLAGS.train_dir,
-            'input_map_shape': [84, 84, 1],
-            'input_params_shape': [4],
+            'input_map_shape': [1],
+            'input_params_shape': [1],
             'owner_id': FLAGS.player_id,
             'env_id': 0,
     }
 
     if FLAGS.dump_model:
-        env = gym.make(config['game'])
-        config['num_actions'] = env.action_space.n
+        #e = gym.make(config['game'])
+        e = env.Env()
+        config['num_actions'] = e.action_space.n
         config['batch_size'] = FLAGS.num_clients
 
         import model
