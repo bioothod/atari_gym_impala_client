@@ -374,7 +374,7 @@ def create_model(config, is_client=False):
     config_internal = {
         'discount_gamma': 0.99,
         'policy_gradient_loss_scale': 1,
-        'cross_entropy_loss_scale': 0.00005,
+        'cross_entropy_loss_scale': 0.00025,
         'baseline_loss_scale': 0.5,
         'summary_steps': 1000,
         'checkpoint_steps': 10000,

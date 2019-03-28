@@ -84,7 +84,7 @@ class rnn_head:
 
             batch_size = config['batch_size']
 
-            num_lstm_outputs = 64
+            num_lstm_outputs = 256
             self.lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(num_lstm_outputs, state_is_tuple=True)
 
             self.c_state_ph = tf.placeholder(tf.float32, shape=[batch_size, self.lstm_cell.state_size.c], name='input/c_state')
