@@ -64,12 +64,11 @@ class Model:
 
         pshape = policy_logits.shape[-1]
         policy_flattened_to_batch = tf.reshape(policy_logits, [-1, pshape])
-        actions_flattened_to_batch = tf.random.multinomial(policy_flattened_to_batch, num_samples=1, output_dtype=tf.int32)
-        actions_flattened_to_batch = tf.squeeze(actions_flattened_to_batch)
-        actions_r = tf.reshape(actions_flattened_to_batch, [-1, self.time_steps_ph])
 
-        target_action_log_probs = -tf.nn.sparse_softmax_cross_entropy_with_logits(logits=policy_flattened_to_batch, labels=actions_flattened_to_batch)
-        bh_action_log_probs = -tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.bh_policy_logits_ph, labels=actions_flattened_to_batch)
+        actions_r = tf.reshape(self.bh_action_taken_ph, [-1, self.time_steps_ph])
+
+        target_action_log_probs = -tf.nn.sparse_softmax_cross_entropy_with_logits(logits=policy_flattened_to_batch, labels=self.bh_action_taken_ph)
+        bh_action_log_probs = -tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.bh_policy_logits_ph, labels=self.bh_action_taken_ph)
         log_rhos = target_action_log_probs - bh_action_log_probs
         log_rhos_r = tf.reshape(log_rhos, [-1, self.time_steps_ph])
 
@@ -107,8 +106,8 @@ class Model:
             policy_gradient_loss_per_timestep = cross_entropy * advantages
             policy_gradient_loss = tf.add(policy_gradient_loss, tf.reduce_sum(policy_gradient_loss_per_timestep) * config['policy_gradient_loss_scale'])
 
-            policy = tf.nn.softmax(policy_logits)
-            log_policy = tf.nn.log_softmax(policy_logits)
+            policy = tf.nn.softmax(policy_logits[i, :, :])
+            log_policy = tf.nn.log_softmax(policy_logits[i, :, :])
             entropy_per_timestep = tf.reduce_sum(-policy * log_policy, axis=-1)
             cross_entropy_loss = tf.add(cross_entropy_loss, -tf.reduce_sum(entropy_per_timestep) * config['cross_entropy_loss_scale'])
 
