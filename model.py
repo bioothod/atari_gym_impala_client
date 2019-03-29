@@ -39,6 +39,9 @@ class Model:
         #clipped_reward = self.reward_ph
         clipped_reward = tf.clip_by_value(self.reward_ph, -1, 1)
 
+        dones_r = tf.reshape(self.done_ph, [-1, self.time_steps_ph])
+        clipped_rewards_r = tf.reshape(clipped_reward, [-1, self.time_steps_ph])
+
         network_dict = {
                 'map': self.map_ph,
                 'params': self.params_ph,
@@ -49,7 +52,7 @@ class Model:
         conv_output = network.create_conv_network(config, network_dict, scope='impala_cnn')
         reshaped_output = tf.reshape(conv_output, [-1, self.time_steps_ph, conv_output.shape[-1]])
 
-        rnn_state = network.rnn_head(config, reshaped_output, scope='impala_rnn')
+        rnn_state = network.rnn_head(config, reshaped_output, dones_r, scope='impala_rnn')
 
         policy_logits = rnn_state.policy_logits
         baseline = rnn_state.baseline
@@ -84,9 +87,6 @@ class Model:
         iter_steps_float = tf.divide(bsize, self.time_steps_ph)
         max_iter_steps = tf.cast(tf.round(iter_steps_float), tf.int32)
         c = lambda i, _l1, _l2, _l3: tf.less(i, max_iter_steps)
-
-        dones_r = tf.reshape(self.done_ph, [-1, self.time_steps_ph])
-        clipped_rewards_r = tf.reshape(clipped_reward, [-1, self.time_steps_ph])
 
         def body(i, policy_gradient_loss, cross_entropy_loss, baseline_loss):
             log_rhos_local = log_rhos_r[i, :]

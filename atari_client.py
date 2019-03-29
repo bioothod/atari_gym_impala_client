@@ -55,7 +55,6 @@ class GameWrapper:
 
         self.graph = tf.Graph()
         with self.graph.as_default():
-            config['batch_size'] = 1
             self.model = model.create_model(config, is_client=True)
             self.have_graph = True
 
@@ -163,13 +162,15 @@ class GameWrapper:
             'input/params:0': input_params,
             'input/action_taken:0': last_actions,
             'input/reward:0': last_rewards,
+            'input/done:0': [False],
             'input/time_steps:0': self.state_stack_size,
             'impala_rnn/input/c_state:0': self.c_state,
             'impala_rnn/input/h_state:0': self.h_state,
         }
 
         logits, action, state = self.sess.run([self.policy_logits_op, self.action_op, self.lstm_state_op], feed_dict = fd)
-        self.c_state, self.h_state = state
+        self.c_state = np.expand_dims(state[0][0], 0)
+        self.h_state = np.expand_dims(state[0][1], 0)
 
         return logits[0][0], action[0]
 
@@ -224,6 +225,10 @@ class GameWrapper:
 
             self.load_model()
 
+        if done:
+            self.c_state = np.zeros_like(self.c_state)
+            self.h_state = np.zeros_like(self.h_state)
+
         self.prev_st = new_st
         self.prev_model_st = new_model_st
         self.prev_action = action
@@ -240,8 +245,7 @@ def run_main():
     parser.add_argument('--remote_addr', default='localhost:5001', type=str, help='Remote service address to connect to for inference')
     parser.add_argument('--logfile', type=str, help='Logfile')
     parser.add_argument('--player_id', default=0, type=int, help='Player ID used to index history entries')
-    parser.add_argument('--num_clients', default=32, type=int, help='Maximum number of clients simultaneously connected to the training server')
-    parser.add_argument('--num_episodes', default=1000, type=int, help='Number of episodes to run')
+    parser.add_argument('--num_episodes', default=10000, type=int, help='Number of episodes to run')
 
     FLAGS = parser.parse_args()
 
@@ -267,7 +271,6 @@ def run_main():
     if FLAGS.dump_model:
         env = gym.make(config['game'])
         config['num_actions'] = env.action_space.n
-        config['batch_size'] = FLAGS.num_clients
 
         import model
 
